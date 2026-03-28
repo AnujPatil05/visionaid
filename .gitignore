@@ -1,0 +1,21 @@
+venv/
+visionaid-env/
+__pycache__/
+*.pyc
+yolo*.pt
+.paddlex/
+.DS_Store
+
+# Flutter ignores
+visionaid_app/build/
+visionaid_app/.dart_tool/
+visionaid_app/.flutter-plugins
+visionaid_app/.flutter-plugins-dependencies
+visionaid_app/.packages
+visionaid_app/.pub-cache/
+visionaid_app/.pub/
+visionaid_app/.idea/
+visionaid_app/*.iml
+visionaid_app/android/local.properties
+visionaid_app/ios/.symlinks/
+visionaid_app/ios/Pods/
