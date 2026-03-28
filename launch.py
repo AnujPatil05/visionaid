@@ -5,6 +5,16 @@ import subprocess
 import time
 import requests
 
+# Always use the venv Python that has all the packages installed.
+# This prevents launch.py (when called with system Python) from spawning
+# a subprocess that can't find fastapi/uvicorn/easyocr etc.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if os.name == 'nt':
+    _VENV_PYTHON = os.path.join(_SCRIPT_DIR, 'backend', 'venv', 'Scripts', 'python.exe')
+else:
+    _VENV_PYTHON = os.path.join(_SCRIPT_DIR, 'backend', 'venv', 'bin', 'python')
+_PYTHON = _VENV_PYTHON if os.path.exists(_VENV_PYTHON) else sys.executable
+
 def get_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -21,7 +31,7 @@ def main():
         
     try:
         import ultralytics
-        from paddleocr import PaddleOCR
+        import easyocr
     except ImportError as e:
         print(f"Error importing models: {e}")
         print("Please install requirements.")
@@ -31,7 +41,7 @@ def main():
     print(f"\nUpdate api_service.dart baseUrl to: http://{ip}:8000\n")
     
     print("Starting FastAPI server...")
-    proc = subprocess.Popen([sys.executable, 'backend/main.py'])
+    proc = subprocess.Popen([_PYTHON, 'backend/main.py'])
     
     health_url = "http://localhost:8000/health"
     passed = False

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:flutter/services.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 import 'api_service.dart';
 
 class CameraScreen extends StatefulWidget {
@@ -18,23 +19,56 @@ class CameraScreen extends StatefulWidget {
 class _CameraScreenState extends State<CameraScreen> {
   late CameraController _ctrl;
   final FlutterTts _tts = FlutterTts();
+
   String _status = 'Hold steady to scan';
   String _lastSpeech = '';
   bool _isDanger = false;
   bool _isScanning = false;
+  bool _isDescribingScene = false;
+
   Timer? _scanTimer;
+
+  // Shake-to-replay state
+  bool _canShake = true;
+  StreamSubscription? _accelSub;
 
   @override
   void initState() {
     super.initState();
     _setupTts();
     _initCamera();
+    _setupShakeDetector();
   }
 
   Future<void> _setupTts() async {
     await _tts.setLanguage("en-US");
     await _tts.setSpeechRate(0.45);
     await _tts.setVolume(1.0);
+  }
+
+  void _setupShakeDetector() {
+    _accelSub = accelerometerEventStream(
+      samplingPeriod: SensorInterval.normalInterval,
+    ).listen((AccelerometerEvent event) {
+      final double force =
+          event.x.abs() + event.y.abs() + event.z.abs();
+
+      // Gravity is ~9.8 m/s²; a good shake pushes well above 25 total
+      if (force > 25 && _canShake && !_isScanning && !_isDescribingScene) {
+        _canShake = false;
+        HapticFeedback.mediumImpact();
+        _tts.speak(
+          _lastSpeech.isEmpty ? "Nothing detected yet." : _lastSpeech,
+        );
+        // 2-second cooldown prevents repeated triggers while shaking
+        Future.delayed(
+          const Duration(seconds: 2),
+          () {
+            if (mounted) setState(() => _canShake = true);
+          },
+        );
+      }
+    });
   }
 
   Future<void> _initCamera() async {
@@ -44,7 +78,12 @@ class _CameraScreenState extends State<CameraScreen> {
     setState(() {});
 
     Future.delayed(const Duration(milliseconds: 500), () {
-      _tts.speak("VisionAid is ready. Point your camera at a sign and hold steady.");
+      _tts.speak(
+        "VisionAid is ready. "
+        "Point your camera at a sign and hold steady. "
+        "Double tap anywhere to describe your surroundings. "
+        "Shake the phone to repeat the last announcement.",
+      );
       _scheduleScan();
     });
   }
@@ -52,14 +91,17 @@ class _CameraScreenState extends State<CameraScreen> {
   void _scheduleScan() {
     _scanTimer?.cancel();
     _scanTimer = Timer(const Duration(milliseconds: 1500), () {
-      if (!_isScanning && mounted) {
+      if (!_isScanning && !_isDescribingScene && mounted) {
         _runScan();
       }
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Sign scan (existing pipeline)
+  // ---------------------------------------------------------------------------
   Future<void> _runScan() async {
-    if (!_ctrl.value.isInitialized || _isScanning) return;
+    if (!_ctrl.value.isInitialized || _isScanning || _isDescribingScene) return;
 
     _scanTimer?.cancel();
 
@@ -73,6 +115,7 @@ class _CameraScreenState extends State<CameraScreen> {
       final response = await ApiService.processFrame(File(img.path));
 
       final action = response['action'];
+
       if (action == 'spoken') {
         final bool danger = response['is_danger'] ?? false;
         final String speech = response['speech'] ?? '';
@@ -94,14 +137,8 @@ class _CameraScreenState extends State<CameraScreen> {
           _status = 'Scan complete';
         });
       } else if (action == 'none' || action == 'low_confidence') {
-        final msg = "No sign found. Try again.";
-        await _tts.setLanguage("en-US");
-        await _tts.setSpeechRate(0.45);
-        await _tts.speak(msg);
-        
         setState(() {
           _status = 'No signs detected';
-          _lastSpeech = '';
           _isDanger = false;
         });
       } else if (action == 'error') {
@@ -112,6 +149,7 @@ class _CameraScreenState extends State<CameraScreen> {
           _status = 'Server Connection Error';
         });
       }
+      // 'buffering' and 'dedup' — no feedback, just continue
     } catch (e) {
       await _tts.setLanguage("en-US");
       await _tts.speak("Network failure. Trying to reconnect.");
@@ -128,9 +166,53 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Scene summary (double-tap — "What's around me?")
+  // ---------------------------------------------------------------------------
+  Future<void> _runSceneSummary() async {
+    if (!_ctrl.value.isInitialized || _isScanning || _isDescribingScene) return;
+
+    _scanTimer?.cancel();
+
+    setState(() {
+      _isDescribingScene = true;
+      _status = 'Describing scene…';
+    });
+
+    HapticFeedback.lightImpact();
+
+    try {
+      final img = await _ctrl.takePicture();
+      final summary = await ApiService.sceneDescribe(File(img.path));
+
+      await _tts.setLanguage("en-IN");
+      await _tts.setSpeechRate(0.45);
+      await _tts.speak(summary);
+
+      setState(() {
+        _lastSpeech = summary;
+        _isDanger = false;
+        _status = 'Scene scanned';
+      });
+    } catch (e) {
+      await _tts.speak("Could not describe the scene. Check your connection.");
+      setState(() {
+        _status = 'Scene scan failed';
+      });
+    } finally {
+      setState(() {
+        _isDescribingScene = false;
+      });
+      Future.delayed(const Duration(seconds: 3), () {
+        if (mounted) _scheduleScan();
+      });
+    }
+  }
+
   @override
   void dispose() {
     _scanTimer?.cancel();
+    _accelSub?.cancel();
     _ctrl.dispose();
     _tts.stop();
     super.dispose();
@@ -145,95 +227,139 @@ class _CameraScreenState extends State<CameraScreen> {
       );
     }
 
+    final bool busy = _isScanning || _isDescribingScene;
+
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Stack(
-        children: [
-          // 1. Camera preview
-          SizedBox.expand(
-            // ADA Fix: TalkBack labels the raw camera feed canvas.
-            child: Semantics(
-              label: 'Camera viewfinder',
-              child: CameraPreview(_ctrl),
-            ),
-          ),
-          
-          // 2. CircularProgressIndicator if scanning
-          if (_isScanning)
-            Center(
-              // ADA Fix: Labels visually abstract loading circles with explicit TTS context.
-              child: Semantics(
-                label: 'Scanning in progress',
-                child: const CircularProgressIndicator(color: Colors.white),
-              ),
-            ),
-            
-          // 3. Bottom overlay
-          Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: Container(
-              color: _isDanger 
-                  ? Colors.red.withOpacity(0.88) 
-                  : Colors.black.withOpacity(0.72),
-              padding: const EdgeInsets.symmetric(vertical: 24.0, horizontal: 16.0),
-              // ADA Fix: liveRegion forces immediate TalkBack announcements when inner text resets.
-              child: Semantics(
-                liveRegion: true,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      _status,
-                      // ADA Fix: Status increased to >= 18sp minimum bounds for low-vision reading.
-                      style: const TextStyle(fontSize: 18, color: Colors.white70),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      _lastSpeech.isNotEmpty ? _lastSpeech : 'Point camera at a sign',
-                      // Defaults to 20sp, comfortably passes the 18sp minimum scale check.
-                      style: const TextStyle(
-                        fontSize: 20, 
-                        fontWeight: FontWeight.bold, 
-                        color: Colors.white
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                  ],
+      body: Semantics(
+        label: 'Double tap to describe surroundings',
+        child: GestureDetector(
+          onDoubleTap: _runSceneSummary,
+          child: Stack(
+            children: [
+              // 1. Camera preview
+              SizedBox.expand(
+                child: Semantics(
+                  label: 'Camera viewfinder',
+                  child: CameraPreview(_ctrl),
                 ),
               ),
-            ),
-          ),
-          
-          // 4. Top-right scan button
-          Positioned(
-            top: 48,
-            right: 16,
-            // ADA Fix: Allows focus-stepping, marks trait as a button, removes reliance on visual center_focus_strong icon.
-            child: Semantics(
-              label: 'Scan now',
-              button: true,
-              child: GestureDetector(
-                onTap: _runScan,
+
+              // 2. Spinner while scanning or describing
+              if (busy)
+                Center(
+                  child: Semantics(
+                    label: _isDescribingScene
+                        ? 'Describing scene in progress'
+                        : 'Scanning in progress',
+                    child: const CircularProgressIndicator(color: Colors.white),
+                  ),
+                ),
+
+              // 3. Bottom overlay
+              Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
                 child: Container(
-                  width: 64,
-                  height: 64,
-                  decoration: const BoxDecoration(
-                    color: Colors.black54,
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.center_focus_strong,
-                    color: Colors.white,
-                    size: 32,
+                  color: _isDanger
+                      ? Colors.red.withOpacity(0.88)
+                      : _isDescribingScene
+                          ? Colors.indigo.withOpacity(0.88)
+                          : Colors.black.withOpacity(0.72),
+                  padding: const EdgeInsets.symmetric(
+                      vertical: 24.0, horizontal: 16.0),
+                  child: Semantics(
+                    liveRegion: true,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          _status,
+                          style: const TextStyle(
+                              fontSize: 18, color: Colors.white70),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          _lastSpeech.isNotEmpty
+                              ? _lastSpeech
+                              : 'Point camera at a sign',
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
+
+              // 4. Top-right manual scan button
+              Positioned(
+                top: 48,
+                right: 16,
+                child: Semantics(
+                  label: 'Scan now. Long press to replay last announcement.',
+                  button: true,
+                  child: GestureDetector(
+                    onTap: _runScan,
+                    onLongPress: () {
+                      HapticFeedback.mediumImpact();
+                      _tts.speak(
+                        _lastSpeech.isEmpty
+                            ? "Nothing yet."
+                            : _lastSpeech,
+                      );
+                    },
+                    child: Container(
+                      width: 64,
+                      height: 64,
+                      decoration: const BoxDecoration(
+                        color: Colors.black54,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.center_focus_strong,
+                        color: Colors.white,
+                        size: 32,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+
+              // 5. Top-left scene describe button (visual affordance)
+              Positioned(
+                top: 48,
+                left: 16,
+                child: Semantics(
+                  label: 'Describe surroundings',
+                  button: true,
+                  child: GestureDetector(
+                    onTap: _runSceneSummary,
+                    child: Container(
+                      width: 64,
+                      height: 64,
+                      decoration: const BoxDecoration(
+                        color: Colors.indigo,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.travel_explore,
+                        color: Colors.white,
+                        size: 30,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }

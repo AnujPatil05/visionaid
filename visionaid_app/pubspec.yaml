@@ -1,5 +1,5 @@
 name: visionaid_app
-description: "A new Flutter project for VisionAid."
+description: "VisionAid — assistive sign-reading app for visually impaired users."
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -11,7 +11,9 @@ dependencies:
     sdk: flutter
   camera: ^0.10.5
   http: ^1.1.0
+  http_parser: ^4.0.2
   flutter_tts: ^3.8.3
+  sensors_plus: ^4.0.2
 
 dev_dependencies:
   flutter_test:
@@ -20,3 +22,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/config.json

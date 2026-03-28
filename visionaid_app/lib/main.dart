@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'api_service.dart';
 import 'camera_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Load server IP from assets/config.json before anything else
+  await ApiService.init();
+
   final cameras = await availableCameras();
-  
+
   runApp(VisionAidApp(cameras: cameras));
 }
 
